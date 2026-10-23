@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MiniIA</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">Mini<span>IA</span></div>
+    <button id="newChat" class="new-chat-btn">+ Nouvelle discussion</button>
+    <div id="conversationList" class="conversation-list"></div>
+    <div class="side-info">
+      <strong>IA locale</strong>
+      <p>Aucune donnée n'est envoyée vers un service cloud.</p>
+    </div>
+  </aside>
+
+  <main class="app">
+    <header>
+      <div>
+        <h1>MiniIA</h1>
+        <p>Assistant local</p>
+      </div>
+      <span class="status">● Local</span>
+    </header>
+
+    <section id="chat" class="chat"></section>
+
+    <form id="form" class="composer">
+      <textarea id="input" rows="1" placeholder="Écris ton message..." autocomplete="off"></textarea>
+      <button id="send" type="submit">➤</button>
+    </form>
+    <div class="hint">MiniIA peut faire des erreurs. Vérifie les informations importantes.</div>
+  </main>
+
+<script>
+const chat = document.getElementById('chat');
+const form = document.getElementById('form');
+const input = document.getElementById('input');
+const send = document.getElementById('send');
+const newChat = document.getElementById('newChat');
+const conversationList = document.getElementById('conversationList');
+
+let conversations = [];
+let activeConversationId = null;
+let history = [];
+
+function renderConversationList(items) {
+  conversationList.innerHTML = '';
+  if (!items || !items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'conversation-empty';
+    empty.textContent = 'Aucune conversation';
+    conversationList.appendChild(empty);
+    return;
+  }
+
+  items.forEach(item => {
+    const button = document.createElement('button');
+    button.className = 'conversation-item' + (item.id === activeConversationId ? ' active' : '');
+    button.textContent = item.title || 'Nouvelle discussion';
+    button.addEventListener('click', () => selectConversation(item.id));
+    conversationList.appendChild(button);
+  });
+}
+
+function renderMessages(messages) {
+  chat.innerHTML = '';
+  if (!messages || messages.length === 0) {
+    const welcome = document.createElement('div');
+    welcome.className = 'welcome';
+    welcome.innerHTML = `
+      <div class="logo">✦</div>
+      <h2>Bonjour 👋</h2>
+      <p>Je suis MiniIA, ton petit assistant IA local.</p>
+      <div class="suggestions">
+        <button>Explique-moi Python simplement</button>
+        <button>Donne-moi une idée de projet</button>
+        <button>Comment fonctionne une IA ?</button>
+      </div>
+    `;
+    chat.appendChild(welcome);
+    welcome.querySelectorAll('.suggestions button').forEach(btn => {
+      btn.addEventListener('click', () => ask(btn.textContent));
+    });
+    return;
+  }
+
+  messages.forEach(item => {
+    if (!item || !item.content) return;
+    const row = document.createElement('div');
+    row.className = 'message ' + (item.role === 'user' ? 'user' : 'assistant');
+
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar';
+    avatar.textContent = item.role === 'user' ? 'Vous' : '✦';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = item.content;
+
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+    chat.appendChild(row);
+  });
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function syncCurrentConversation() {
+  const found = conversations.find(c => c.id === activeConversationId);
+  history = found ? found.messages || [] : [];
+  renderMessages(history);
+}
+
+async function loadConversations() {
+  try {
+    const response = await fetch('/history');
+    const data = await response.json();
+    conversations = data.conversations || [];
+    activeConversationId = data.activeConversationId || (conversations[0] ? conversations[0].id : null);
+    renderConversationList(conversations);
+    syncCurrentConversation();
+  } catch (err) {
+    conversations = [];
+    activeConversationId = null;
+    renderConversationList([]);
+    renderMessages([]);
+  }
+}
+
+async function createNewConversation() {
+  try {
+    const response = await fetch('/new-conversation', { method: 'POST' });
+    const data = await response.json();
+    const newConv = data.conversation;
+    conversations = [...conversations, newConv];
+    activeConversationId = newConv.id;
+    renderConversationList(conversations);
+    history = [];
+    renderMessages([]);
+  } catch (err) {
+    // ignore
+  }
+}
+
+async function selectConversation(id) {
+  activeConversationId = id;
+  renderConversationList(conversations);
+  const conversation = conversations.find(c => c.id === id);
+  history = conversation ? conversation.messages || [] : [];
+  renderMessages(history);
+
+  try {
+    await fetch('/select-conversation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversationId: id })
+    });
+  } catch (err) {
+    // ignore
+  }
+}
+
+async function ask(message) {
+  if (!activeConversationId && conversations.length === 0) {
+    await createNewConversation();
+  }
+
+  const previous = [...history];
+  const userMessage = { role: 'user', content: message };
+  history.push(userMessage);
+  renderMessages(history);
+
+  send.disabled = true;
+  input.disabled = true;
+
+  const loading = document.createElement('div');
+  loading.className = 'message assistant';
+  loading.id = 'loading';
+  loading.innerHTML = '<div class="avatar">✦</div><div class="bubble typing">MiniIA réfléchit…</div>';
+  chat.appendChild(loading);
+  chat.scrollTop = chat.scrollHeight;
+
+  try {
+    const response = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message,
+        history: previous,
+        conversationId: activeConversationId
+      })
+    });
+    const data = await response.json();
+    loading.remove();
+
+    if (!response.ok) throw new Error(data.error || 'Erreur inconnue');
+    const assistantMessage = { role: 'assistant', content: data.answer };
+    const currentConversation = conversations.find(c => c.id === activeConversationId);
+    if (!currentConversation) {
+      const fresh = {
+        id: data.conversationId || activeConversationId,
+        title: message.slice(0, 30) || 'Nouvelle discussion',
+        messages: [...previous, userMessage, assistantMessage]
+      };
+      conversations.push(fresh);
+      activeConversationId = fresh.id;
+    } else {
+      currentConversation.messages = [...(currentConversation.messages || []), userMessage, assistantMessage];
+      if (!currentConversation.title || currentConversation.title === 'Nouvelle discussion') {
+        currentConversation.title = message.slice(0, 30) || 'Nouvelle discussion';
+      }
+    }
+    renderConversationList(conversations);
+    history = conversations.find(c => c.id === activeConversationId)?.messages || [];
+    renderMessages(history);
+  } catch (err) {
+    loading.remove();
+    const errorMessage = { role: 'assistant', content: 'Erreur : ' + err.message };
+    history.push(errorMessage);
+    renderMessages(history);
+  } finally {
+    send.disabled = false;
+    input.disabled = false;
+    input.focus();
+  }
+}
+
+form.addEventListener('submit', e => {
+  e.preventDefault();
+  const message = input.value.trim();
+  if (!message || send.disabled) return;
+  input.value = '';
+  input.style.height = 'auto';
+  ask(message);
+});
+
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    form.requestSubmit();
+  }
+});
+
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+});
+
+newChat.addEventListener('click', async () => {
+  await createNewConversation();
+  input.focus();
+});
+
+window.addEventListener('DOMContentLoaded', loadConversations);
+</script>
+</body>
+</html>
